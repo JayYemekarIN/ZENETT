@@ -21,7 +21,7 @@ puppeteer.use(StealthPlugin());
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
 (async () => {
-    console.log(`🚀 Starting ${BOT_NAME} (Hunter Mode)...`);
+    console.log(`🚀 Starting ${BOT_NAME} (Dynamic Chat Fix)...`);
 
     const browser = await puppeteer.launch({
         headless: false,
@@ -40,73 +40,138 @@ const delay = (ms) => new Promise(res => setTimeout(res, ms));
     page.setDefaultNavigationTimeout(60000); 
 
     // ==========================================
-    // 1. DISCORD SETUP (Hunter Logic)
+    // 1. STARTUP: LOGIN & CHAT ONLY
     // ==========================================
     console.log("🔑 Logging in...");
     await page.goto(VC_URL, { waitUntil: 'domcontentloaded' });
+    
+    // Wait for basic UI to load
+    await delay(5000);
 
+    // 🟢 FIXED: Robust Dynamic Chat Logic
+    console.log("💬 Checking Chat...");
     try {
-        console.log("⏳ Hunting for 'Join Voice' button...");
-        await delay(5000); // Wait for Discord to fully load UI
+        // 1. Check if chat is ALREADY open (Look for the text input box)
+        const chatInput = await page.$('div[class*="channelTextArea"]'); 
 
-        // 🟢 THE HUNTER LOGIC
-        // Scans every single button on the page for the text "Join Voice"
-        const clicked = await page.evaluate(() => {
-            // Get every button-like element
-            const allButtons = Array.from(document.querySelectorAll('button, [role="button"], div[role="button"]'));
-            
-            // Find the one that has "Join Voice" inside it
-            const target = allButtons.find(btn => btn.innerText && btn.innerText.includes("Join Voice"));
-            
-            if (target) {
-                target.click();
-                return true;
-            }
-            return false;
-        });
-
-        if (clicked) {
-            console.log("✅ Hunter found and clicked 'Join Voice'!");
+        if (chatInput) {
+            console.log("✅ Chat is already open.");
         } else {
-            console.log("⚠️ Hunter could not find the button. Trying Double-Click fallback...");
-            // Fallback: Double click "General" (or whatever name is usually top)
-            // You can customize this fallback if needed
+            console.log("   -> Chat closed. Searching for dynamic button...");
+            
+            // 2. Dynamic Search: Find button STARTING WITH "Show Chat"
+            // The ^ symbol means "starts with". This matches:
+            // "Show Chat"
+            // "Show Chat, 1 new message"
+            // "Show Chat, 2 mentions, unread"
+            const chatBtn = await page.waitForSelector('button[aria-label^="Show Chat"]', { timeout: 5000 });
+            
+            if (chatBtn) {
+                await chatBtn.click();
+                console.log("✅ Clicked 'Show Chat'!");
+            } else {
+                console.log("⚠️ Chat button not found (Selector mismatch).");
+            }
         }
+    } catch(e) { 
+        console.log("⚠️ Chat Error:", e.message); 
+    }
 
-        await delay(3000); 
+    // State Tracking
+    let isConnected = false;
+    let videoTab = null;
+
+    // ==========================================
+    // 2. HELPER: JOIN & STREAM
+    // ==========================================
+    async function joinVoiceAndStream() {
+        if (isConnected) return; 
+
+        console.log("🚀 'Play' received. Joining Voice Channel...");
         
-        // 🔴 AUTO-DEAFEN
-        console.log("Rx Deafen Mode...");
-        await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll('button[aria-label="Deafen"]'));
-            if (btns.length > 0) btns[0].click();
-        });
-
-        // Step B: Open Chat
-        console.log("💬 Opening Chat...");
-        const chatBtnSelector = 'button[aria-label="Show Chat"]';
-        const chatAlreadyOpen = await page.$('div[class*="chat-"]'); 
-        if (!chatAlreadyOpen) {
-            try {
-                await page.waitForSelector(chatBtnSelector, { timeout: 5000 });
-                await page.click(chatBtnSelector);
-            } catch(e) {}
-        }
-
-        // Step C: Share Screen
-        console.log("🎥 Clicking 'Share Screen'...");
         try {
-            await page.waitForSelector('button[aria-label*="Share"]', { timeout: 5000 });
-            await page.click('button[aria-label*="Share"]');
-            console.log("👉 ACTION: Select 'Entire Screen' -> 'Go Live'");
-        } catch(e) {}
+            // HUNTER JOIN LOGIC (Find "Join Voice" text)
+            const joined = await page.evaluate(() => {
+                const allButtons = Array.from(document.querySelectorAll('button, [role="button"], div[role="button"]'));
+                const target = allButtons.find(btn => btn.innerText && btn.innerText.includes("Join Voice"));
+                if (target) {
+                    target.click();
+                    return true;
+                }
+                return false;
+            });
 
-    } catch (e) {
-        console.log(`⚠️ Join Failed: ${e.message}`);
+            if (joined) {
+                console.log("✅ Joined Voice!");
+                await delay(2000);
+            } else {
+                console.log("⚠️ 'Join Voice' button not found. Assuming already connected.");
+            }
+
+            // DEAFEN
+            try {
+                const deafenBtn = await page.$('button[aria-label="Deafen"]');
+                if (deafenBtn) await deafenBtn.click();
+            } catch(e) {}
+
+            // START STREAM
+            console.log("🎥 Starting Stream...");
+            try {
+                const shareBtn = await page.waitForSelector('button[aria-label*="Share"]', { timeout: 3000 });
+                if (shareBtn) {
+                    await shareBtn.click();
+                    console.log("👉 ACTION: Select 'Entire Screen' -> 'Go Live'");
+                    await delay(5000); 
+                }
+            } catch(e) {
+                console.log("⚠️ Could not auto-click Share (maybe already streaming).");
+            }
+
+            isConnected = true;
+
+        } catch (e) {
+            console.log(`❌ Join Failed: ${e.message}`);
+        }
     }
 
     // ==========================================
-    // 2. HELPER: RUN CLI
+    // 3. HELPER: LEAVE VOICE (Quit Video -> Disconnect)
+    // ==========================================
+    async function leaveVoice() {
+        console.log("🛑 Stop command received.");
+        
+        // 1. QUIT VIDEO FIRST (Kill the tab)
+        if (videoTab) {
+            try {
+                await videoTab.close();
+                videoTab = null;
+                console.log("🗑️ Video tab closed (Audio Stopped).");
+            } catch (e) {
+                console.log("⚠️ Error closing tab:", e.message);
+            }
+        }
+
+        // 2. DISCONNECT
+        console.log("🔌 Disconnecting...");
+        try {
+            // Find Red Phone Button
+            const disconnectBtn = await page.waitForSelector('button[aria-label="Disconnect"]', { timeout: 5000 });
+            if (disconnectBtn) {
+                await disconnectBtn.click();
+                console.log("✅ Disconnected.");
+            } else {
+                console.log("⚠️ Disconnect button not found.");
+            }
+            
+            isConnected = false;
+            
+        } catch (e) {
+            console.log(`⚠️ Error disconnecting: ${e.message}`);
+        }
+    }
+
+    // ==========================================
+    // 4. HELPER: CLI EXTRACTION
     // ==========================================
     function getDirectLinkFromCLI(uuidUrl, episode) {
         return new Promise((resolve, reject) => {
@@ -136,11 +201,12 @@ const delay = (ms) => new Promise(res => setTimeout(res, ms));
     }
 
     // ==========================================
-    // 3. MAIN LOGIC (With Controls)
+    // 5. MAIN PLAY LOGIC
     // ==========================================
-    let videoTab = null;
-
     async function playAnime(query, epNumber) {
+        // Ensure connection
+        await joinVoiceAndStream();
+
         console.log(`🔍 [DEBUG] Searching for "${query}"...`);
         
         if (videoTab) { try { await videoTab.close(); } catch (e) {} }
@@ -191,6 +257,7 @@ const delay = (ms) => new Promise(res => setTimeout(res, ms));
         }
     }
 
+    // Media Controls
     async function pauseVideo() {
         if (videoTab && !videoTab.isClosed()) {
             console.log("⏸️ Pausing...");
@@ -211,21 +278,16 @@ const delay = (ms) => new Promise(res => setTimeout(res, ms));
         }
     }
 
-    async function disconnectBot() {
-        console.log("🛑 Stop command received.");
-        await browser.close();
-        process.exit(0);
-    }
-
     // ==========================================
-    // 4. MONITORING LOOP
+    // 6. MONITORING LOOP
     // ==========================================
+    // Capture history to ignore
     let lastMsg = await page.evaluate(() => {
         const msgs = document.querySelectorAll('[class*="messageContent"]');
         return msgs.length ? msgs[msgs.length - 1].innerText : "";
     });
 
-    console.log(`🛡️ Ignoring Old Messages. Waiting for NEW commands...`);
+    console.log(`🛡️ History ignored. Waiting for NEW commands...`);
 
     while (true) {
         try {
@@ -246,7 +308,7 @@ const delay = (ms) => new Promise(res => setTimeout(res, ms));
                     } 
                     else if (lowerCmd.includes("pause")) await pauseVideo();
                     else if (lowerCmd.includes("start") || lowerCmd.includes("resume")) await resumeVideo();
-                    else if (lowerCmd.includes("stop") || lowerCmd.includes("disconnect")) await disconnectBot();
+                    else if (lowerCmd.includes("stop") || lowerCmd.includes("disconnect")) await leaveVoice();
                 }
             }
         } catch (e) {}
